@@ -98,13 +98,14 @@ public:
     void SeekAbsolute(double seconds)    { SeekAsync(seconds); }
 
     // Media properties
-    void SetVolume(double vol)           { SetPropertyDoubleAsync("volume", vol); }
-    void SetMuted(bool muted)            { SetPropertyFlagAsync("mute", muted); }
-    void SetSpeed(double rate)           { SetPropertyDoubleAsync("speed", rate); }
-    void SetAudioTrack(int64_t id)       { SetPropertyIntAsync("aid", id); }
-    void SetSubtitleTrack(int64_t id)    { SetPropertyIntAsync("sid", id); }
-    void SetAudioDelay(double secs)      { SetPropertyDoubleAsync("audio-delay", secs); }
-    void SetStartPosition(double secs)   { SetPropertyDoubleAsync("start", secs); }
+    void SetVolume(double vol)                        { SetPropertyDoubleAsync("volume", vol); }
+    void SetMuted(bool muted)                         { SetPropertyFlagAsync("mute", muted); }
+    void SetSpeed(double rate)                        { SetPropertyDoubleAsync("speed", rate); }
+    void SetAudioTrack(int64_t id)                    { SetPropertyIntAsync("aid", id); }
+    void SetSubtitleTrack(int64_t id)                 { SetPropertyIntAsync("sid", id); }
+    void AddExternalSubtitle(const std::string& url)  { CommandAsync({"sub-add", url}); }
+    void SetAudioDelay(double secs)                   { SetPropertyDoubleAsync("audio-delay", secs); }
+    void SetStartPosition(double secs)                { SetPropertyDoubleAsync("start", secs); }
 
     // mpv track selection: -1 = auto, 0 = disable, 1+ = specific track
     static constexpr int64_t kTrackAuto    = -1;

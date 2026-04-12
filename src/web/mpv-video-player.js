@@ -161,12 +161,16 @@
                     audioParam = relIdx != null ? relIdx : MpvPlayerCore.TRACK_AUTO;
                 }
 
-                // Convert subtitle index to relative
+                // Convert subtitle index to relative.
+                // If the selected subtitle is external, we add the subtitle through the callback
+                // to ensure we only add it after the player is playing.
                 let subParam = MpvPlayerCore.TRACK_DISABLE;
+                let externalSubUrl = null;
                 if (defaultSubIdx >= 0) {
                     const subStream = getStreamByIndex(streams, defaultSubIdx);
                     if (subStream && subStream.DeliveryMethod === 'External' && subStream.DeliveryUrl) {
-                        subParam = MpvPlayerCore.TRACK_AUTO;  // External not supported yet
+                        externalSubUrl = subStream.DeliveryUrl;
+                        subParam = MpvPlayerCore.DISABLED;
                     } else {
                         const relIdx = getRelativeIndexByType(streams, defaultSubIdx, 'Subtitle');
                         subParam = relIdx != null ? relIdx : MpvPlayerCore.TRACK_AUTO;
@@ -178,7 +182,12 @@
                     { type: 'video', metadata: options.item },
                     audioParam,
                     subParam,
-                    resolve);
+                    () => {
+                        if (externalSubUrl) {
+                            window.api.player.addExternalSubtitle(externalSubUrl);
+                        }
+                        resolve();
+                    });
             });
         }
 
@@ -190,7 +199,7 @@
             const streams = this._currentPlayOptions?.mediaSource?.MediaStreams || [];
             const stream = getStreamByIndex(streams, index);
             if (stream && stream.DeliveryMethod === 'External' && stream.DeliveryUrl) {
-                console.log('[Media] External subtitles not supported yet');
+                window.api.player.addExternalSubtitle(stream.DeliveryUrl);
                 return;
             }
             const relIdx = getRelativeIndexByType(streams, index, 'Subtitle');

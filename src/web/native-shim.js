@@ -242,6 +242,11 @@
             },
             setSubtitleDelay(ms) {
                 console.log('[Media] player.setSubtitleDelay:', ms);
+                console.warn('[Media] player.setSubtitleDelay not implemented yet');
+            },
+            addExternalSubtitle(url) {
+                console.log('[Media] player.addExternalSubtitle:', url);
+                if (window.jmpNative) window.jmpNative.playerAddExternalSubtitle(url);
             },
             setAudioDelay(ms) {
                 console.log('[Media] player.setAudioDelay:', ms);
