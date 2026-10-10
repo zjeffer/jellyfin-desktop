@@ -5,6 +5,7 @@
 
 use std::cell::Cell;
 use std::num::NonZeroU32;
+use std::time::Instant;
 
 #[cfg(target_os = "linux")]
 use raw_window_handle::{
@@ -163,6 +164,7 @@ pub struct Surface<'a> {
     // Set by every configure, drained by `take_configured`. A Cell because
     // configures also happen on `&self` paths inside `draw_and_present`.
     configured: Cell<bool>,
+    present_sequence: u64,
 }
 
 /// The surface's `CAMetalLayer` pointer, when its target has one.
@@ -269,6 +271,7 @@ impl<'a> Surface<'a> {
             mode: None,
             shared_bind: None,
             configured: Cell::new(false),
+            present_sequence: 0,
         };
         // Other surfaces may be submitting on the shared device while this
         // painter is created, so the first configure must be gated too.
@@ -417,6 +420,11 @@ impl<'a> Surface<'a> {
         Ok((w, h))
     }
 
+    fn next_present_sequence(&mut self) -> u64 {
+        self.present_sequence = self.present_sequence.wrapping_add(1);
+        self.present_sequence
+    }
+
     /// Present CPU pixels, latching the copied kind on this surface's first
     /// frame.
     ///
@@ -429,6 +437,7 @@ impl<'a> Surface<'a> {
         frame: Pixels<'_>,
         on_present: impl FnOnce(),
     ) -> Result<Presented, PresentFailed> {
+        let present_id = self.next_present_sequence();
         self.latch(PaintMode::Copied)?;
         let (fw, fh) = self.frame_extent(frame.size)?;
         check_buffer(&frame, fw, fh)?;
@@ -440,7 +449,7 @@ impl<'a> Surface<'a> {
         upload.write(&self.ctx.queue, &frame, cw, ch);
         let bind_group = upload.bind_group.clone();
         self.upload = Some(upload);
-        self.draw_and_present(&bind_group, None, None, on_present)
+        self.draw_and_present(&bind_group, None, None, present_id, on_present)
     }
 
     /// Present a shared texture, latching the shared kind on this surface's
@@ -450,6 +459,7 @@ impl<'a> Surface<'a> {
         frame: &SharedTexture,
         on_present: impl FnOnce(),
     ) -> Result<Presented, PresentFailed> {
+        let present_id = self.next_present_sequence();
         self.latch(PaintMode::Shared)?;
         let (fw, fh) = self.frame_extent(frame.coded())?;
 
@@ -467,20 +477,23 @@ impl<'a> Surface<'a> {
         // A failed import is not a lost surface: a shared frame has no CPU
         // pixels, so there is nowhere to degrade to. The last good frame stays
         // on screen and the producer owes the successor.
-        let imported = match self.importer.import(&self.ctx.device, frame) {
-            Ok(imported) => imported,
-            Err(e) => {
-                tracing::warn!("gpu_paint: {e}");
-                return Err(PresentFailed::Import);
-            }
-        };
+        let imported = self
+            .importer
+            .import(&self.ctx.device, frame)
+            .map_err(|_| PresentFailed::Import)?;
         // A reused import is the importer's cached texture, so the bind group
         // over it is reusable too; anything else must be rebound.
         let bind_group = match self.shared_bind.take() {
             Some(bind_group) if imported.reused => bind_group,
             _ => bind_texture(self.ctx, "jfn_gpu_paint shared bg", &imported.texture),
         };
-        let result = self.draw_and_present(&bind_group, imported.acquire, viewport, on_present);
+        let result = self.draw_and_present(
+            &bind_group,
+            imported.acquire,
+            viewport,
+            present_id,
+            on_present,
+        );
         self.shared_bind = Some(bind_group);
         result
     }
@@ -525,12 +538,26 @@ impl<'a> Surface<'a> {
     /// Acquire the next swapchain frame with no gate held, reconfiguring once
     /// if the swapchain is stale. A swapchain with no texture this cycle is a
     /// [`PresentFailed::Deferred`], never a fault.
-    fn acquire_frame(&self) -> Result<AcquiredFrame, PresentFailed> {
+    fn acquire_frame(&self, present_id: u64) -> Result<AcquiredFrame, PresentFailed> {
         use wgpu::CurrentSurfaceTexture::*;
         let mut reconfigured = false;
+        let mut attempt = 0u32;
         loop {
+            attempt += 1;
+            let started = Instant::now();
+            tracing::trace!(
+                "gpu_paint: surface texture acquire begin (present_id={}, attempt={})",
+                present_id,
+                attempt
+            );
             match self.surface.get_current_texture() {
                 Success(frame) => {
+                    tracing::trace!(
+                        "gpu_paint: surface texture acquired (present_id={}, attempt={}, elapsed={:?})",
+                        present_id,
+                        attempt,
+                        started.elapsed()
+                    );
                     return Ok(AcquiredFrame {
                         frame,
                         suboptimal: false,
@@ -566,7 +593,9 @@ impl<'a> Surface<'a> {
                 Lost | Outdated | Timeout | Occluded => {
                     return Err(PresentFailed::Deferred(Deferred::new()));
                 }
-                Validation => return Err(SurfaceLost::from(Kind::Acquire("validation")).into()),
+                Validation => {
+                    return Err(SurfaceLost::from(Kind::Acquire("validation")).into());
+                }
             }
         }
     }
@@ -576,9 +605,10 @@ impl<'a> Surface<'a> {
         bind_group: &wgpu::BindGroup,
         external_image: Option<u64>,
         viewport: Option<(f32, f32, f32, f32)>,
+        present_id: u64,
         on_present: impl FnOnce(),
     ) -> Result<Presented, PresentFailed> {
-        let AcquiredFrame { frame, suboptimal } = self.acquire_frame()?;
+        let AcquiredFrame { frame, suboptimal } = self.acquire_frame(present_id)?;
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());

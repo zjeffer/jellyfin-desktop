@@ -33,7 +33,7 @@ pub(crate) enum LayerBackend {
     Shm,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Kind {
     Gpu,
     Shm,
@@ -153,7 +153,19 @@ impl LayerState {
         self.shadow = ShadowState::Stale;
     }
 
-    fn enqueue_gpu(&mut self, payload: GpuPayload) {
+    fn enqueue_gpu(&mut self, mut payload: GpuPayload) {
+        if let Some(PendingFrame::Gpu(previous)) = self.pending.as_ref() {
+            let can_merge = previous.width == payload.width
+                && previous.height == payload.height
+                && previous.stride == payload.stride
+                && !previous.dirty.is_empty()
+                && !payload.dirty.is_empty();
+            if can_merge {
+                payload.dirty.extend_from_slice(&previous.dirty);
+            } else {
+                payload.dirty.clear();
+            }
+        }
         self.supersede(PendingFrame::Gpu(payload));
     }
 
@@ -733,15 +745,16 @@ impl Runner {
             };
             // This path only ever carries CPU pixels; Wayland's shared frames
             // are a `wl_buffer` dmabuf attach and never reach wgpu.
-            let new = gpu
-                .new_surface(
-                    target,
-                    PhysicalSize {
-                        w: p.width as i32,
-                        h: p.height as i32,
-                    },
-                )
-                .map_err(|e| PresentError::Gpu(PresentFailed::from(e)))?;
+            let new = match gpu.new_surface(
+                target,
+                PhysicalSize {
+                    w: p.width as i32,
+                    h: p.height as i32,
+                },
+            ) {
+                Ok(surface) => surface,
+                Err(error) => return Err(PresentError::Gpu(PresentFailed::from(error))),
+            };
             *painter = Some(Box::new(new));
         }
         let Some(painter) = painter.as_mut() else {
@@ -1110,6 +1123,55 @@ mod tests {
             panic!("expected shm payload");
         };
         assert_eq!(p.rects.len(), 2);
+    }
+
+    fn test_gpu_payload(pixel: u8, width: u32, height: u32, dirty: Vec<JfnRect>) -> GpuPayload {
+        GpuPayload {
+            pixels: vec![pixel],
+            dirty,
+            width,
+            height,
+            stride: width * 4,
+        }
+    }
+
+    #[test]
+    fn enqueue_gpu_merges_dirty_only_frames_with_matching_geometry() {
+        let mut state = LayerState::new(vp());
+        state.enqueue_gpu(test_gpu_payload(1, 100, 100, vec![rect(1, 2, 3, 4)]));
+        state.enqueue_gpu(test_gpu_payload(2, 100, 100, vec![rect(5, 6, 7, 8)]));
+
+        let Some(PendingFrame::Gpu(payload)) = &state.pending else {
+            panic!("expected gpu payload");
+        };
+        assert_eq!(payload.pixels, vec![2]);
+        assert_eq!(payload.dirty.len(), 2);
+        assert_eq!(payload.dirty[0].x, 5);
+        assert_eq!(payload.dirty[1].x, 1);
+    }
+
+    #[test]
+    fn enqueue_gpu_forces_full_upload_when_geometry_changes() {
+        let mut state = LayerState::new(vp());
+        state.enqueue_gpu(test_gpu_payload(1, 100, 100, vec![rect(1, 2, 3, 4)]));
+        state.enqueue_gpu(test_gpu_payload(2, 200, 200, vec![rect(5, 6, 7, 8)]));
+
+        let Some(PendingFrame::Gpu(payload)) = &state.pending else {
+            panic!("expected gpu payload");
+        };
+        assert!(payload.dirty.is_empty());
+    }
+
+    #[test]
+    fn enqueue_gpu_preserves_full_upload_marker_when_superseded() {
+        let mut state = LayerState::new(vp());
+        state.enqueue_gpu(test_gpu_payload(1, 100, 100, Vec::new()));
+        state.enqueue_gpu(test_gpu_payload(2, 100, 100, vec![rect(5, 6, 7, 8)]));
+
+        let Some(PendingFrame::Gpu(payload)) = &state.pending else {
+            panic!("expected gpu payload");
+        };
+        assert!(payload.dirty.is_empty());
     }
 
     #[test]

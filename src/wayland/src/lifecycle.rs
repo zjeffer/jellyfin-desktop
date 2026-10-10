@@ -115,11 +115,9 @@ pub(crate) fn init(
                 tracing::info!("paint: EGL/GBM dmabuf shared texture");
                 resolved = Req::Dmabuf;
             } else {
-                tracing::info!("paint: EGL dmabuf unavailable; trying gpu");
+                tracing::info!("paint: EGL dmabuf unavailable; using wl_shm");
                 // SAFETY: backend initialization owns native lifecycle authority.
                 unsafe { jfn_platform_abi::get() }.set_shared_texture_unsupported();
-                want_gpu_paint = true;
-                resolved = Req::Gpu;
             }
         }
     }
